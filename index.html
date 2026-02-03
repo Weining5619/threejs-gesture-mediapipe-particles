@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>九号球+恒星的恒星演唱会串场舞美交互粒子复刻</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #010101;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+        }
+
+        .simple-status {
+            background: rgba(0, 0, 0, 0.6);
+            padding: 12px 16px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 136, 255, 0.3);
+            font-family: monospace;
+            font-size: 0.9rem;
+            color: #ccc;
+            min-width: 160px;
+        }
+
+        .status-line {
+            margin: 4px 0;
+        }
+
+        .active-text { 
+            color: #00ffcc; 
+            text-shadow: 0 0 8px rgba(0, 255, 204, 0.6); 
+            font-weight: bold; 
+        }
+
+        #camera-container {
+            position: absolute;
+            bottom: 25px;
+            right: 25px;
+            width: 200px;
+            height: 150px;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid rgba(0, 136, 255, 0.6);
+            background: #000;
+            transform: scaleX(-1);
+            box-shadow: 0 0 20px rgba(0, 136, 255, 0.3);
+        }
+
+        video { width: 100%; height: 100%; object-fit: cover; opacity: 0.6; }
+
+        #loading-msg {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); color: #0088ff; font-size: 1.2rem;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading-msg">系统构建中...</div>
+
+    <div id="ui-overlay">
+        <div class="simple-status">
+            <div class="status-line" id="status-right">右手: 未检测</div>
+            <div class="status-line" id="status-left">左手: 未检测</div>
+        </div>
+    </div>
+
+    <div id="camera-container">
+        <video id="input-video"></video>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+    <script>
+        let scene, camera, renderer, particles, geometry, cubeTexture, beamTexture;
+        let beamParticles, beamGeometry;
+        let meteorParticles, meteorGeometry;
+        
+        // 粒子总量：23万 (3万月球 + 20万城市)
+        const PARTICLE_COUNT = 230000; 
+        const BEAM_PARTICLE_COUNT = 15000; 
+        
+        // 流星配置: 3000粒子
+        const METEOR_COUNT = 3000; 
+        const METEOR_GROUPS = 10; 
+        const METEOR_PER_GROUP = 300; 
+        
+        const MOON_COUNT = 30000; 
+        
+        const initPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositions9 = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositionsMoonCity = new Float32Array(PARTICLE_COUNT * 3);
+        
+        const initColorsBlue = new Float32Array(PARTICLE_COUNT * 3);
+        const initColorsWhite = new Float32Array(PARTICLE_COUNT * 3);
+        const targetColors9 = new Float32Array(PARTICLE_COUNT * 3);
+        const targetColorsMoonCity = new Float32Array(PARTICLE_COUNT * 3);
+        
+        const beamAngles = new Float32Array(BEAM_PARTICLE_COUNT);
+        const beamScalars = new Float32Array(BEAM_PARTICLE_COUNT);
+        
+        const meteorPos = new Float32Array(METEOR_COUNT * 3);
+        const meteorRelX = new Float32Array(METEOR_COUNT);
+        const meteorRelY = new Float32Array(METEOR_COUNT);
+        const meteorRelZ = new Float32Array(METEOR_COUNT);
+        
+        // 组数据：记录每组流星的基准位置
+        const meteorGroupX = new Float32Array(METEOR_GROUPS);
+        const meteorGroupY = new Float32Array(METEOR_GROUPS);
+        const meteorGroupZ = new Float32Array(METEOR_GROUPS);
+        const meteorGroupSpeed = new Float32Array(METEOR_GROUPS);
+
+        let sceneStage = 0; 
+        let transitionState = 0; 
+        let isRightPinching = false;
+        let isLeftPinching = false;
+        let hasLeftHand = false; 
+        let hasHandsDetected = false;
+        
+        let whiteTransition = 0; 
+        let moonCityTransition = 0; 
+        
+        let beamProgress = 0; 
+        let isOverloaded = false; 
+        let beamScatter = 0; 
+
+        let nebulaRotY = 0, nebulaRotX = 0;
+        let ballRotY = -0.8; 
+        let moonRotY = 0; 
+        let cityScrollX = 0; 
+
+        const videoElement = document.getElementById('input-video');
+        const statusRightUI = document.getElementById('status-right');
+        const statusLeftUI = document.getElementById('status-left');
+        const loadingMsg = document.getElementById('loading-msg');
+
+        window.onload = function() {
+            if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
+                console.warn("MediaPipe 库尚未加载完成");
+            }
+            
+            try {
+                createTextures();
+                initThree();
+                initMoonCityTargets(); 
+                initMeteors();
+                initMediaPipe();
+                animate();
+            } catch (e) {
+                console.error("初始化失败:", e);
+                loadingMsg.innerText = "初始化失败: " + e.message;
+                loadingMsg.style.color = "red";
+            }
+        };
+
+        function createTextures() {
+            const c1 = document.createElement('canvas'); c1.width = 64; c1.height = 64;
+            const ctx1 = c1.getContext('2d');
+            ctx1.fillStyle = 'white'; ctx1.fillRect(8, 8, 48, 48); 
+            cubeTexture = new THREE.CanvasTexture(c1);
+
+            const c2 = document.createElement('canvas'); c2.width = 64; c2.height = 64;
+            const ctx2 = c2.getContext('2d');
+            const g = ctx2.createRadialGradient(32, 32, 0, 32, 32, 32);
+            g.addColorStop(0, 'rgba(255,255,255,1)');
+            g.addColorStop(0.3, 'rgba(255,255,255,0.9)');
+            g.addColorStop(0.5, 'rgba(112,243,255,0.1)');
+            g.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx2.fillStyle = g; ctx2.fillRect(0, 0, 64, 64);
+            beamTexture = new THREE.CanvasTexture(c2);
+        }
+
+        function drawBallTexture(ctx) {
+            ctx.fillStyle = 'white'; ctx.fillRect(0, 0, 256, 256);
+            ctx.fillStyle = 'black'; ctx.font = 'bold 185px Arial';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('9', 128, 120);
+            ctx.fillRect(85, 210, 86, 16); 
+        }
+
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 30000);
+            camera.position.z = 1000;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            beamGeometry = new THREE.BufferGeometry();
+            const bPos = new Float32Array(BEAM_PARTICLE_COUNT * 3);
+            const bCol = new Float32Array(BEAM_PARTICLE_COUNT * 3);
+            for (let i = 0; i < BEAM_PARTICLE_COUNT; i++) {
+                const isBlueCore = i < BEAM_PARTICLE_COUNT * 0.7;
+                beamAngles[i] = Math.random() * Math.PI * 2;
+                beamScalars[i] = Math.random();
+                if (isBlueCore) { bCol[i*3]=0.05; bCol[i*3+1]=0.15; bCol[i*3+2]=0.6; } 
+                else { bCol[i*3]=1.0; bCol[i*3+1]=1.0; bCol[i*3+2]=1.0; }
+                bPos[i*3] = -4000; bPos[i*3+1] = 0; bPos[i*3+2] = 0; 
+            }
+            beamGeometry.setAttribute('position', new THREE.BufferAttribute(bPos, 3));
+            beamGeometry.setAttribute('color', new THREE.BufferAttribute(bCol, 3));
+            beamParticles = new THREE.Points(beamGeometry, new THREE.PointsMaterial({
+                size: 22, vertexColors: true, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, map: beamTexture
+            }));
+            beamParticles.renderOrder = 999999;
+            scene.add(beamParticles);
+
+            meteorGeometry = new THREE.BufferGeometry();
+            const mCols = new Float32Array(METEOR_COUNT * 3);
+            for(let i=0; i<METEOR_COUNT; i++) { 
+                meteorPos[i*3] = -5000; 
+                mCols[i*3]=1.0; mCols[i*3+1]=0.5; mCols[i*3+2]=0.0; // 橙色
+            }
+            meteorGeometry.setAttribute('position', new THREE.BufferAttribute(meteorPos, 3));
+            meteorGeometry.setAttribute('color', new THREE.BufferAttribute(mCols, 3));
+            meteorParticles = new THREE.Points(meteorGeometry, new THREE.PointsMaterial({
+                size: 12, vertexColors: true, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, map: beamTexture
+            }));
+            meteorParticles.renderOrder = 800; // 在城市之上，月球之后
+            scene.add(meteorParticles);
+
+            geometry = new THREE.BufferGeometry();
+            const canvas9 = document.createElement('canvas'); canvas9.width = 256; canvas9.height = 256;
+            drawBallTexture(canvas9.getContext('2d'));
+
+            const ballRadius = 180;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = 850 * Math.pow(Math.random(), 0.85);
+                const theta = Math.random() * 2 * Math.PI;
+                const phi = Math.acos(2 * Math.random() - 1);
+                initPositions[i*3] = r * Math.sin(phi) * Math.cos(theta);
+                initPositions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+                initPositions[i*3+2] = r * Math.cos(phi);
+
+                initColorsBlue[i*3] = 0.05; initColorsBlue[i*3+1] = 0.15; initColorsBlue[i*3+2] = 0.6;
+                initColorsWhite[i*3] = 1.0; initColorsWhite[i*3+1] = 1.0; initColorsWhite[i*3+2] = 1.0;
+
+                const tPhi = Math.acos(2 * Math.random() - 1);
+                const tTheta = Math.random() * 2 * Math.PI;
+                targetPositions9[i*3] = ballRadius * Math.sin(tPhi) * Math.cos(tTheta);
+                targetPositions9[i*3+1] = ballRadius * Math.sin(tPhi) * Math.sin(tTheta);
+                targetPositions9[i*3+2] = ballRadius * Math.cos(tPhi);
+
+                const dXY = Math.sqrt(targetPositions9[i*3]**2 + targetPositions9[i*3+1]**2);
+                const dXZ = Math.sqrt(targetPositions9[i*3]**2 + targetPositions9[i*3+2]**2);
+                let isC = Math.abs(targetPositions9[i*3+1]) > ballRadius*0.5 && dXZ < ballRadius*0.866;
+                let isF = targetPositions9[i*3+2] > ballRadius*0.7 && dXY < ballRadius/3.5;
+                let isB = targetPositions9[i*3+2] < -ballRadius*0.7 && dXY < ballRadius/3.5;
+                let c = { r: 1.0, g: 0.25, b: 0.02 }; 
+                if (isC || isF || isB) {
+                    c = { r: 1.0, g: 1.0, b: 1.0 };
+                    if (isF || isB) {
+                        const ux = isF ? targetPositions9[i*3] : -targetPositions9[i*3];
+                        const u = (ux/(ballRadius/3.5))*0.5+0.5;
+                        const v = (-targetPositions9[i*3+1]/(ballRadius/3.5))*0.5+0.5;
+                        const pData = canvas9.getContext('2d').getImageData(u*255, v*255, 1, 1).data;
+                        if(pData[0]<128) c = {r:0.02, g:0.02, b:0.02};
+                    }
+                }
+                targetColors9[i*3] = c.r; targetColors9[i*3+1] = c.g; targetColors9[i*3+2] = c.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PARTICLE_COUNT*3), 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(PARTICLE_COUNT*3), 3));
+            particles = new THREE.Points(geometry, new THREE.PointsMaterial({
+                size: 3.5, vertexColors: true, transparent: true, opacity: 1.0, blending: THREE.AdditiveBlending, map: cubeTexture, depthWrite: false
+            }));
+            scene.add(particles);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function initMoonCityTargets() {
+            const moonR = 220; 
+            for (let i = 0; i < MOON_COUNT; i++) {
+                const phi = Math.acos(2 * Math.random() - 1);
+                const theta = Math.random() * 2 * Math.PI;
+                const r = moonR * (0.98 + Math.random() * 0.04); 
+                targetPositionsMoonCity[i*3] = r * Math.sin(phi) * Math.cos(theta);
+                targetPositionsMoonCity[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+                targetPositionsMoonCity[i*3+2] = r * Math.cos(phi);
+
+                const noise = Math.random();
+                let col = {r:0.8, g:0.8, b:0.9}; 
+                if (noise < 0.3) col = {r:0.05, g:0.05, b:0.1}; 
+                else if (noise < 0.5) col = {r:0.3, g:0.3, b:0.4}; 
+                else if (noise < 0.7) col = {r:0.2, g:0.4, b:0.8}; 
+                targetColorsMoonCity[i*3] = col.r; targetColorsMoonCity[i*3+1] = col.g; targetColorsMoonCity[i*3+2] = col.b;
+            }
+
+            // 2. 城市背景 (后 200000 粒子)
+            let pIdx = MOON_COUNT;
+            const cityWidth = 6000; 
+            let currentX = -cityWidth / 2;
+
+            while (pIdx < PARTICLE_COUNT && currentX < cityWidth / 2) {
+                const buildingW = 50 + Math.random() * 120;
+                const buildingH = 300 + Math.random() * 700;
+                const gap = 2 + Math.random() * 8; 
+                const step = 4; 
+                
+                const cols = Math.floor(buildingW / step);
+                const rows = Math.floor(buildingH / step);
+                
+                for(let r=0; r<rows; r++) {
+                    for(let c=0; c<cols; c++) {
+                        if (pIdx >= PARTICLE_COUNT) break;
+                        targetPositionsMoonCity[pIdx*3] = currentX + c * step;
+                        targetPositionsMoonCity[pIdx*3+1] = -500 + r * step; 
+                        targetPositionsMoonCity[pIdx*3+2] = -600 - Math.random() * 200; 
+                        
+                        const isWin = (r%5!==0) && (c%4!==0); 
+                        if (isWin && Math.random() > 0.6) { 
+                            targetColorsMoonCity[pIdx*3] = 0.27; targetColorsMoonCity[pIdx*3+1] = 0.81; targetColorsMoonCity[pIdx*3+2] = 0.96;
+                        } else {
+                            const shade = 0.6 + Math.random() * 0.4;
+                            targetColorsMoonCity[pIdx*3] = 0.29 * shade; targetColorsMoonCity[pIdx*3+1] = 0.36 * shade; targetColorsMoonCity[pIdx*3+2] = 0.77 * shade; 
+                        }
+                        pIdx++;
+                    }
+                }
+                
+                if(pIdx < PARTICLE_COUNT && Math.random()>0.7) {
+                    const beaconX = currentX + buildingW/2;
+                    const beaconY = -500 + buildingH + 5;
+                    for(let b=0; b<12; b++){ 
+                         if (pIdx >= PARTICLE_COUNT) break;
+                         targetPositionsMoonCity[pIdx*3] = beaconX + (Math.random()-0.5)*15;
+                         targetPositionsMoonCity[pIdx*3+1] = beaconY + (Math.random()-0.5)*15;
+                         targetPositionsMoonCity[pIdx*3+2] = -600;
+                         targetColorsMoonCity[pIdx*3] = 0.24; targetColorsMoonCity[pIdx*3+1]=0.93; targetColorsMoonCity[pIdx*3+2]=0.91;
+                         pIdx++;
+                    }
+                }
+                currentX += buildingW + gap;
+            }
+            
+            while(pIdx < PARTICLE_COUNT) {
+                 targetPositionsMoonCity[pIdx*3] = (Math.random()-0.5)*7000;
+                 targetPositionsMoonCity[pIdx*3+1] = -500 + Math.random()*1500;
+                 targetPositionsMoonCity[pIdx*3+2] = -1000;
+                 targetColorsMoonCity[pIdx*3] = 0.9; targetColorsMoonCity[pIdx*3+1]=0.9; targetColorsMoonCity[pIdx*3+2]=1.0;
+                 pIdx++;
+            }
+        }
+
+        // 初始化橙色光束 (长条圆锥)
+        function initMeteors() {
+            let idx = 0;
+            for(let g=0; g<METEOR_GROUPS; g++) {
+                // 每组基准位置
+                const startX = -1000 - Math.random() * 2000;
+                const startY = (Math.random() - 0.5) * 600;
+                const startZ = -300 - Math.random() * 250; 
+                
+                const speed = 5 + Math.random() * 7; 
+                const groupLength = 400 + Math.random() * 200; // 长度 400-600
+
+                meteorGroupX[g] = startX;
+                meteorGroupY[g] = startY;
+                meteorGroupZ[g] = startZ;
+                meteorGroupSpeed[g] = speed;
+
+                for(let p=0; p<METEOR_PER_GROUP; p++) {
+                    const rel = p / METEOR_PER_GROUP; // 0头 1尾
+                    
+                    const coneR = rel * 8; // 尾部发散
+                    const angle = Math.random() * Math.PI * 2;
+                    
+                    meteorRelX[idx] = -rel * groupLength; // 负X方向延展
+                    meteorRelY[idx] = Math.cos(angle) * coneR;
+                    meteorRelZ[idx] = Math.sin(angle) * coneR;
+                    
+                    // 初始赋值
+                    meteorPos[idx*3] = startX + meteorRelX[idx];
+                    meteorPos[idx*3+1] = startY + meteorRelY[idx];
+                    meteorPos[idx*3+2] = startZ + meteorRelZ[idx];
+                    idx++;
+                }
+            }
+        }
+
+        function initMediaPipe() {
+            if (typeof window.Hands === 'undefined' || typeof window.Camera === 'undefined') {
+                console.error("MediaPipe libraries not loaded.");
+                return;
+            }
+
+            const hands = new window.Hands({ 
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}` 
+            });
+            hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            hands.onResults(onHandResults);
+            
+            const cam = new window.Camera(videoElement, { 
+                onFrame: async () => { await hands.send({image: videoElement}); }, width: 640, height: 480 
+            });
+            cam.start();
+            loadingMsg.style.display = 'none';
+        }
+
+        function onHandResults(results) {
+            let rP = false, lP = false, hasLeft = false, hasH = false;
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                hasH = true;
+                results.multiHandLandmarks.forEach((lm, idx) => {
+                    const label = results.multiHandedness[idx].label;
+                    const isRight = label === 'Left'; 
+                    const dist = Math.sqrt(Math.pow(lm[4].x - lm[8].x, 2) + Math.pow(lm[4].y - lm[8].y, 2));
+                    const p = dist < 0.1;
+                    if (isRight) {
+                        rP = p;
+                    } else {
+                        lP = p;
+                        hasLeft = true;
+                    }
+                });
+            }
+            isRightPinching = rP; isLeftPinching = lP; hasLeftHand = hasLeft; hasHandsDetected = hasH;
+            
+            statusRightUI.innerHTML = `右手: ${rP ? '<span class="active-text">捏合</span>' : '张开'}`;
+            statusLeftUI.innerHTML = `左手: ${lP ? '<span class="active-text">捏合</span>' : (hasLeft ? '<span class="active-text">张开</span>' : '未检测')}`;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 光束逻辑
+            let beamActive = isLeftPinching && sceneStage !== 2;
+            if (beamActive) {
+                beamParticles.material.opacity += (1.0 - beamParticles.material.opacity) * 0.4;
+                beamProgress = Math.min(1.0, beamProgress + 0.0008); 
+            } else {
+                beamParticles.material.opacity += (0 - beamParticles.material.opacity) * 0.15;
+                beamProgress = Math.max(0, beamProgress - 0.05);
+                if (beamProgress < 0.01) isOverloaded = false;
+            }
+            const headX = -700 + beamProgress * 12700;
+
+            // 状态机
+            if (sceneStage === 0) {
+                let targetTrans = (isRightPinching && !isOverloaded) ? 1 : 0;
+                transitionState += (targetTrans - transitionState) * 0.12;
+                
+                const bR = 180;
+                if (transitionState > 0.4 && headX > -bR) {
+                    const hitP = (headX - (-bR)) / (bR * 2);
+                    whiteTransition = Math.max(whiteTransition, Math.min(1.0, hitP));
+                }
+                if (isRightPinching && transitionState > 0.8 && headX > 180 && !isOverloaded) {
+                    isOverloaded = true;
+                    sceneStage = 1;
+                }
+            } 
+            else if (sceneStage === 1) {
+                whiteTransition += (1.0 - whiteTransition) * 0.1;
+                transitionState += (0 - transitionState) * 0.1; 
+                starRiverMode = 1;
+                beamScatter += (1.0 - beamScatter) * 0.08; 
+
+                if (whiteTransition > 0.9 && hasLeftHand && !isLeftPinching) {
+                    sceneStage = 2; moonCityTransition = 0;
+                }
+            } 
+            else if (sceneStage === 2) {
+                moonCityTransition += (1.0 - moonCityTransition) * 0.05;
+                starRiverMode += (0 - starRiverMode) * 0.05; 
+                beamScatter += (0 - beamScatter) * 0.1; 
+                
+                cityScrollX -= 3.5; 
+                if (cityScrollX < -3000) cityScrollX += 6000;
+            }
+
+            if (!hasHandsDetected && sceneStage !== 0) {
+                sceneStage = 0; starRiverMode = 0; whiteTransition = 0; moonCityTransition = 0; isOverloaded = false; beamProgress = 0; beamScatter = 0;
+            }
+
+            // V18 光束
+            const bPosArr = beamGeometry.attributes.position.array;
+            const beamLength = 19300; const whiteBaseR = 400; 
+
+            for (let i = 0; i < BEAM_PARTICLE_COUNT; i++) {
+                const idx = i * 3; const isBlueCore = i < BEAM_PARTICLE_COUNT * 0.7;
+                const angle = beamAngles[i]; const scalar = beamScalars[i];
+                let px=0, py=0, pz=0;
+
+                if (isBlueCore) {
+                    const dist = i / (BEAM_PARTICLE_COUNT * 0.7); const R_left = 3; const R_right = 12;
+                    if (dist < 0.7) {
+                        const rel = dist / 0.7; px = (headX - beamLength) + rel * beamLength;
+                        const currentR = R_left + rel * (R_right - R_left);
+                        const r = Math.sqrt(scalar) * currentR; py = Math.cos(angle)*r; pz = Math.sin(angle)*r;
+                    } else if (dist < 0.85) {
+                        const r = Math.pow(Math.random(), 1/3) * R_right;
+                        const phi = Math.acos(Math.random()); const theta = Math.random()*Math.PI*2;
+                        px = headX + Math.abs(r*Math.sin(Math.acos(Math.random()))*Math.cos(Math.random()*Math.PI*2)); 
+                        py = r*Math.sin(phi)*Math.sin(theta); pz = r*Math.cos(phi);
+                    } else {
+                        const r = Math.pow(Math.random(), 1/3) * R_left;
+                        const phi = Math.acos(Math.random()); const theta = Math.random()*Math.PI*2;
+                        px = (headX - beamLength) - Math.abs(r*Math.sin(Math.acos(Math.random()))*Math.cos(Math.random()*Math.PI*2)); 
+                        py = r*Math.sin(phi)*Math.sin(theta); pz = r*Math.cos(phi);
+                    }
+                } else {
+                    const rel = (i - BEAM_PARTICLE_COUNT * 0.7) / (BEAM_PARTICLE_COUNT * 0.3);
+                    px = headX - rel * beamLength; const umbrellaR = 10 + Math.pow(rel, 0.5) * whiteBaseR;
+                    const r = Math.sqrt(scalar) * umbrellaR; py = Math.cos(angle)*r; pz = Math.sin(angle)*r;
+                }
+                if (beamScatter > 0.01) {
+                    px += (Math.random()-0.5)*3000*beamScatter; py += (Math.random()-0.5)*3000*beamScatter; pz += (Math.random()-0.5)*3000*beamScatter;
+                }
+                bPosArr[idx] = px; bPosArr[idx+1] = py; bPosArr[idx+2] = pz;
+            }
+            beamGeometry.attributes.position.needsUpdate = true;
+
+            // 流星
+            if (sceneStage === 2) {
+                meteorParticles.material.opacity += (1.0 - meteorParticles.material.opacity) * 0.1;
+                const mPos = meteorGeometry.attributes.position.array;
+                
+                let mIdx = 0;
+                for(let g=0; g<METEOR_GROUPS; g++) {
+                    let gx = meteorGroupX[g];
+                    gx += meteorGroupSpeed[g];
+                    
+                    if (gx > 2000) { 
+                        gx = -2000 - Math.random() * 1000; 
+                        meteorGroupY[g] = (Math.random()-0.5)*800; 
+                        meteorGroupZ[g] = -300 - Math.random() * 250; 
+                    }
+                    meteorGroupX[g] = gx;
+                    
+                    const gy = meteorGroupY[g];
+                    const gz = meteorGroupZ[g];
+                    
+                    for(let p=0; p<METEOR_PER_GROUP; p++) {
+                        mPos[mIdx*3] = gx + meteorRelX[mIdx];
+                        mPos[mIdx*3+1] = gy + meteorRelY[mIdx];
+                        mPos[mIdx*3+2] = gz + meteorRelZ[mIdx];
+                        mIdx++;
+                    }
+                }
+                meteorGeometry.attributes.position.needsUpdate = true;
+            } else {
+                meteorParticles.material.opacity += (0 - meteorParticles.material.opacity) * 0.2;
+            }
+
+            // 主粒子渲染
+            if (sceneStage === 2) {
+                particles.rotation.set(0, 0, 0); 
+                moonRotY += 0.002;
+            } else {
+                nebulaRotY += 0.001; 
+                if (sceneStage === 0 && isRightPinching) ballRotY += 0.005;
+                particles.rotation.y = nebulaRotY * (1 - transitionState) + ballRotY * transitionState;
+            }
+
+            const pos = geometry.attributes.position.array;
+            const cols = geometry.attributes.color.array;
+            const t = Date.now() * 0.001;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                let tx, ty, tz, tr, tg, tb;
+
+                if (sceneStage === 2) {
+                    if (i < MOON_COUNT) {
+                        const mx = targetPositionsMoonCity[idx]; const mz = targetPositionsMoonCity[idx+2];
+                        tx = mx * Math.cos(moonRotY) + mz * Math.sin(moonRotY);
+                        tz = mz * Math.cos(moonRotY) - mx * Math.sin(moonRotY);
+                        ty = targetPositionsMoonCity[idx+1];
+                        tr = targetColorsMoonCity[idx]; tg = targetColorsMoonCity[idx+1]; tb = targetColorsMoonCity[idx+2];
+                    } else {
+                        let cx = targetPositionsMoonCity[idx] + cityScrollX;
+                        while(cx < -3000) cx += 6000; while(cx > 3000) cx -= 6000;
+                        tx = cx; 
+                        ty = targetPositionsMoonCity[idx+1]; 
+                        tz = targetPositionsMoonCity[idx+2];
+                        tr = targetColorsMoonCity[idx]; tg = targetColorsMoonCity[idx+1]; tb = targetColorsMoonCity[idx+2];
+                    }
+                } else {
+                    tx = sceneStage===1 ? initPositions[idx]*2.5 : (transitionState > 0.1 ? targetPositions9[idx] : initPositions[idx]);
+                    ty = sceneStage===1 ? initPositions[idx+1]*2.5 : (transitionState > 0.1 ? targetPositions9[idx+1] : initPositions[idx+1]);
+                    tz = sceneStage===1 ? initPositions[idx+2]*2.5 : (transitionState > 0.1 ? targetPositions9[idx+2] : initPositions[idx+2]);
+                    
+                    if (sceneStage === 1) { 
+                        tr = 1.0; tg = 1.0; tb = 1.0; 
+                    } else {
+                        const bR_col = targetColors9[idx]*(1-whiteTransition) + whiteTransition;
+                        const bG_col = targetColors9[idx+1]*(1-whiteTransition) + whiteTransition;
+                        const bB_col = targetColors9[idx+2]*(1-whiteTransition) + whiteTransition;
+                        const rR = initColorsBlue[idx]; const rG = initColorsBlue[idx+1]; const rB = initColorsBlue[idx+2];
+                        tr = rR*(1-transitionState) + bR_col*transitionState;
+                        tg = rG*(1-transitionState) + bG_col*transitionState;
+                        tb = rB*(1-transitionState) + bB_col*transitionState;
+                    }
+                }
+
+                const lerpFac = (sceneStage === 2) ? 0.08 : 0.15;
+                const drift = (sceneStage >= 1) ? 0 : (1-transitionState)*3.5;
+                
+                if (sceneStage !== 2 || i >= MOON_COUNT) {
+                     pos[idx] += (tx + Math.sin(t*0.5+i*0.1)*drift - pos[idx]) * lerpFac;
+                     pos[idx+1] += (ty + Math.cos(t*0.5+i*0.1)*drift - pos[idx+1]) * lerpFac;
+                     pos[idx+2] += (tz - pos[idx+2]) * lerpFac;
+                } else {
+                     pos[idx] += (tx - pos[idx]) * lerpFac;
+                     pos[idx+1] += (ty - pos[idx+1]) * lerpFac;
+                     pos[idx+2] += (tz - pos[idx+2]) * lerpFac;
+                }
+
+                cols[idx] += (tr - cols[idx]) * lerpFac;
+                cols[idx+1] += (tg - cols[idx+1]) * lerpFac;
+                cols[idx+2] += (tb - cols[idx+2]) * lerpFac;
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
